@@ -1,0 +1,8 @@
+# LangChain + OpenAI + HTTP tools
+langchain==1.2.15
+langchain-openai==1.1.12
+langchain-classic==1.0.3
+requests==2.33.1
+beautifulsoup4==4.14.3
+python-dotenv==1.2.2
+pydantic==2.12.5
