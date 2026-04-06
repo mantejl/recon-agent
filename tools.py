@@ -10,7 +10,7 @@ import json
 import re
 import ssl
 from typing import Any
-from urllib.parse import urldefrag, urljoin, urlparse
+from urllib.parse import parse_qs, urldefrag, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 import truststore
@@ -75,8 +75,7 @@ def fetch_headers(url: str) -> dict[str, Any]:
             findings.append(
                 {
                     "header": canonical,
-                    "status": "missing",
-                    "severity": "medium",
+                    "status": "missing"
                 }
             )
 
@@ -154,6 +153,130 @@ def extract_links(url: str) -> dict[str, Any]:
 def extract_links_summary(url: str) -> str:
     return json.dumps(extract_links(url), indent=2)
 
+
+_SQL_ERROR_HINTS = (
+    "sql syntax",
+    "mysql",
+    "sqlite",
+    "postgresql",
+    "ora-",
+    "odbc",
+    "mysqli",
+    "sqlserver",
+    "unclosed quotation",
+)
+
+_SENSITIVE_PATHS = ("/admin", "/api/users", "/api/admin", "/dashboard", "/login")
+
+
+def test_sqli(url: str, parameter_name: str) -> dict[str, Any]:
+    """
+    Compare baseline GET vs same URL with SQL-ish payloads in one query parameter.
+
+    Facts only: lengths, status codes, simple SQL error-like substrings in body.
+    Use only on lab apps you are authorized to test.
+    """
+    raw_url = _sanitize_tool_url(url)
+    parameter_name = (parameter_name or "").strip()
+    parsed = urlparse(raw_url)
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    if not parameter_name or parameter_name not in qs:
+        return {
+            "check": "test_sqli",
+            "error": "parameter_not_in_query",
+            "url": raw_url,
+            "hint": "Use a URL whose query string includes the parameter, e.g. http://host/vuln.php?id=1",
+        }
+
+    def _with_query(update: dict[str, list[str]]) -> str:
+        merged = {k: v[:] for k, v in qs.items()}
+        for k, v in update.items():
+            merged[k] = v
+        q = urlencode(merged, doseq=True)
+        return urlunparse(
+            (parsed.scheme, parsed.netloc, parsed.path, parsed.params, q, "")
+        )
+
+    baseline = _http_get(raw_url)
+    baseline_body = baseline.text or ""
+    baseline_len = len(baseline_body)
+
+    payloads = [
+        "' OR '1'='1",
+        "' OR 1=1--",
+        "1' OR '1'='1",
+        "admin'--",
+        "' UNION SELECT NULL--",
+    ]
+    trials: list[dict[str, Any]] = []
+    for payload in payloads:
+        trial_url = _with_query({parameter_name: [payload]})
+        r = _http_get(trial_url)
+        body = (r.text or "").lower()
+        trials.append(
+            {
+                "payload": payload,
+                "url": trial_url,
+                "status_code": r.status_code,
+                "body_length": len(r.text or ""),
+                "delta_from_baseline": len(r.text or "") - baseline_len,
+                "sql_error_like_pattern": any(h in body for h in _SQL_ERROR_HINTS),
+            }
+        )
+
+    return {
+        "check": "test_sqli",
+        "baseline_url": str(baseline.url),
+        "baseline_status_code": baseline.status_code,
+        "baseline_body_length": baseline_len,
+        "parameter": parameter_name,
+        "trials": trials,
+    }
+
+
+def test_sqli_summary(url: str, parameter_name: str) -> str:
+    return json.dumps(test_sqli(url, parameter_name), indent=2)
+
+
+def probe_sensitive_paths(base_url: str) -> dict[str, Any]:
+    """
+    GET common sensitive paths under base_url without credentials.
+
+    Facts only: status_code and length per path.
+    """
+    parsed = urlparse(_sanitize_tool_url(base_url))
+    if not parsed.scheme or not parsed.netloc:
+        return {
+            "check": "probe_sensitive_paths",
+            "error": "need_absolute_url_with_host",
+            "hint": base_url,
+            "probes": [],
+        }
+    root = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+    probes: list[dict[str, Any]] = []
+    for path in _SENSITIVE_PATHS:
+        full = f"{root}{path}"
+        r = _http_get(full)
+        probes.append(
+            {
+                "path": path,
+                "final_url": str(r.url),
+                "status_code": r.status_code,
+                "body_length": len(r.text or ""),
+            }
+        )
+    return {
+        "check": "probe_sensitive_paths",
+        "base_url": root,
+        "probes": probes,
+    }
+
+
+def probe_sensitive_paths_summary(base_url: str) -> str:
+    return json.dumps(probe_sensitive_paths(base_url), indent=2)
+
+
+
 # LangChain tools (ReAct agent calls these by name) 
 #  tool → summary → core logic
 
@@ -191,7 +314,46 @@ def extract_same_host_links(url: str) -> str:
     return extract_links_summary(_sanitize_tool_url(url))
 
 
-RECON_TOOLS = [fetch_headers_for_audit, extract_same_host_links]
+@tool
+def probe_sensitive_paths_tool(base_url: str) -> str:
+    """Probe standard sensitive paths (/admin, /api/users, /api/admin, /dashboard, /login) under this origin.
+
+    Use after you know the site's base URL. Interprets as unauthenticated GET facts
+    (status codes, lengths). A 200 on /admin may warrant attention on lab targets.
+
+    Args:
+        base_url: Scheme + host (+ optional port), e.g. http://localhost or http://localhost:80
+
+    Returns:
+        JSON string of probes.
+    """
+    return probe_sensitive_paths_summary(_sanitize_tool_url(base_url))
+
+
+@tool
+def test_sqli_in_parameter(url: str, parameter_name: str) -> str:
+    """Send SQL injection probe payloads in one existing query parameter.
+
+    The URL must already contain the parameter in its query string (e.g. ?id=1).
+    Reports body length deltas and simple SQL error-pattern matches vs baseline.
+    **Lab / authorized targets only** (e.g. DVWA).
+
+    Args:
+        url: Full URL including query string with the parameter.
+        parameter_name: Name of the query parameter to inject (e.g. id).
+
+    Returns:
+        JSON string with baseline and trial rows.
+    """
+    return test_sqli_summary(_sanitize_tool_url(url), parameter_name.strip())
+
+
+RECON_TOOLS = [
+    fetch_headers_for_audit,
+    extract_same_host_links,
+    probe_sensitive_paths_tool,
+    test_sqli_in_parameter,
+]
 
 
 if __name__ == "__main__":

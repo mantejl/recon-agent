@@ -28,8 +28,8 @@ def build_agent_executor(
     *,
     model: str = DEFAULT_MODEL,
     temperature: float = 0,
-    verbose: bool = True,
-    max_iterations: int = 15,
+    verbose: bool = False,
+    max_iterations: int = 25,
 ) -> AgentExecutor:
     llm = ChatOpenAI(model=model, temperature=temperature)
     prompt = pull("hwchase17/react-chat")
@@ -51,19 +51,18 @@ def run_audit(
 ) -> dict:
     """Run header check + link extraction; Final Answer must include judged severities."""
     executor = build_agent_executor(model=model, verbose=verbose)
-    instruction = f"""Audit this target URL: {target_url.strip()}
+    instruction = f"""You are a careful security reconnaissance assistant. Target entry URL: {target_url.strip()}
 
-You must:
-1) Call fetch_headers_for_audit with that exact URL first.
-2) Call extract_same_host_links with the same URL second.
-3) In your Final Answer, assign **severity** (exactly one of: low, medium, high, critical) to each distinct finding from the tool results.
+Process (adapt order: use judgment, you are not a rigid script):
+1) Use fetch_headers_for_audit on the entry URL.
+2) Use extract_same_host_links on the entry URL.
+3) **Reason over observations:** If links suggest login, admin, or API surfaces, or a query parameter worth testing on a lab, call additional tools.
+   - Use probe_sensitive_paths_tool with the site's **origin** only (scheme + host + port, no path), e.g. from `http://host/foo` use `http://host`.
+   - Use test_sqli_in_parameter **only** when you have a concrete URL that already has a query param (e.g. `...?id=1`) **and** the user context is an authorized lab; never invent a param name.
+   - For **test_sqli_in_parameter** the Action Input must be JSON on one line, e.g. {{"url":"http://host/page?id=1","parameter_name":"id"}}.
+4) Final Answer: severities (low/medium/high/critical) for each measured issue, grounded only in tool facts. Note uncertainty. Summarize link discovery and any probes you ran. Short overall risk paragraph.
 
-Rules:
-- Base severities only on **facts** in the tool observations. Do not claim issues you did not measure.
-- If context is thin (unknown app sensitivity), prefer **lower** severity and state that limitation.
-- For **each** missing security header reported by the header tool, give: header name, severity, one-sentence rationale.
-- Summarize same-host links (count; note if zero) and optional severity for attack-surface visibility with brief justification.
-- Finish with one short overall risk paragraph."""
+Rules: only report what tools returned; do not claim checks you did not run."""
     return executor.invoke({"input": instruction, "chat_history": ""})
 
 
