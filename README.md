@@ -22,8 +22,6 @@ Once implemented, the repo is structured roughly like this:
 - **`agent.py`** — Wires **`ChatOpenAI`** to a **ReAct agent** (e.g. LangChain’s `AgentExecutor` + `create_react_agent` in `langchain-classic`) with the tool list, **system prompt**, and **`verbose`** logging so you can see Thought / Action / Observation in the terminal.
 - **`report.py`** — Turns the collected **findings** into **JSON** (and later optional Markdown) for demos and interviews.
 
-There is **no magic inside the model** for fetching pages: every HTTP request and HTML parse happens inside **your** tool code.
-
 ## What you should see when you run it
 
 With `verbose` logging enabled, a run should show **multiple tool invocations** (for example headers first, then link extraction), then a short **natural-language summary**. Separately, you can print or save a **JSON array** of findings (`vuln_type`, `endpoint`, `severity`, `evidence`, `recommendation`, etc.) built from what the tools recorded.
