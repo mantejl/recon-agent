@@ -237,7 +237,7 @@ def test_sqli(url: str, parameter_name: str) -> dict[str, Any]:
 def test_sqli_summary(url: str, parameter_name: str) -> str:
     return json.dumps(test_sqli(url, parameter_name), indent=2)
 
-
+     
 def probe_sensitive_paths(base_url: str) -> dict[str, Any]:
     """
     GET common sensitive paths under base_url without credentials.
