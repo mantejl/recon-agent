@@ -17,8 +17,10 @@ from rich.rule import Rule
 
 from tools import RECON_TOOLS
 
-_ROOT = Path(__file__).resolve().parent
-load_dotenv(_ROOT / ".env")
+# gets path of project and loads the env var
+ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
+
 
 console = Console()
 DEFAULT_MODEL = "gpt-4o-mini"
