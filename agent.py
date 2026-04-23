@@ -7,9 +7,10 @@ import re
 from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain_classic.agents import AgentExecutor, create_react_agent
-from langchain_classic.hub import pull
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
+from langgraph.graph.state import CompiledStateGraph
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -21,28 +22,54 @@ from tools import RECON_TOOLS
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 
-
+# used to print/format text in terminal
 console = Console()
+# model enum
 DEFAULT_MODEL = "gpt-4o-mini"
+# system prompt for the agent
+SYSTEM_PROMPT = """You are a careful security reconnaissance assistant.
+
+Process (adapt order: use judgment, you are not a rigid script):
+1) Use fetch_headers_for_audit on the entry URL.
+2) Use extract_same_host_links on the entry URL.
+3) Reason over observations: If links suggest login, admin, or API surfaces, or a query parameter worth testing on a lab, call additional tools.
+   - Use probe_sensitive_paths_tool with the site's origin only (scheme + host + port, no path), e.g. from `http://host/foo` use `http://host`.
+   - Use test_sqli_in_parameter only when you have a concrete URL that already has a query param (e.g. `...?id=1`) and the user context is an authorized lab; never invent a param name.
+4) Final answer: severities (low/medium/high/critical) for each measured issue, grounded only in tool facts. Note uncertainty. Summarize link discovery and any probes you ran. Short overall risk paragraph.
+
+Rules: only report what tools returned; do not claim checks you did not run."""
 
 
-def build_agent_executor(
-    *,
+def build_agent(
+    *,  # must pass arguments with "keyword-only" syntax
     model: str = DEFAULT_MODEL,
-    temperature: float = 0,
-    verbose: bool = False,
-    max_iterations: int = 25,
-) -> AgentExecutor:
+    temperature: float = 0,  # controls randomness of model output
+) -> CompiledStateGraph:
     llm = ChatOpenAI(model=model, temperature=temperature)
-    prompt = pull("hwchase17/react-chat")
-    agent = create_react_agent(llm, RECON_TOOLS, prompt)
-    return AgentExecutor(
-        agent=agent,
-        tools=RECON_TOOLS,
-        verbose=verbose,
-        handle_parsing_errors=True,
-        max_iterations=max_iterations,
-    )
+    return create_agent(llm, RECON_TOOLS, system_prompt=SYSTEM_PROMPT)
+
+
+def print_trace_message(msg) -> None:
+    """Pretty-print a single message from the agent trace (verbose mode)."""
+    # langchain has multiple message types, so we need to verify the message is an LLM output
+    if isinstance(msg, AIMessage):
+        # printing out tool calls
+        if msg.tool_calls:
+            for call in msg.tool_calls:
+                console.print(
+                    f"[bold yellow]Action:[/bold yellow] {call['name']}  "
+                    f"[dim]{call.get('args', {})}[/dim]"
+                )
+        text = (msg.content or "").strip() if isinstance(msg.content, str) else ""
+        if text:
+            console.print(f"[bold cyan]Thought/Answer:[/bold cyan] {text}")
+    elif isinstance(msg, ToolMessage):
+        # converting preview to string if needed
+        preview = (msg.content or "") if isinstance(msg.content, str) else str(msg.content)
+        # if the preview is too long, we truncate it
+        if len(preview) > 500:
+            preview = preview[:500] + "…"
+        console.print(f"[bold green]Observation[/bold green] ({msg.name}): {preview}")
 
 
 def run_audit(
@@ -50,22 +77,30 @@ def run_audit(
     *,
     model: str = DEFAULT_MODEL,
     verbose: bool = False,
+    max_iterations: int = 25,  # cap ReAct loop length
 ) -> dict:
-    """Run header check + link extraction; Final Answer must include judged severities."""
-    executor = build_agent_executor(model=model, verbose=verbose)
-    instruction = f"""You are a careful security reconnaissance assistant. Target entry URL: {target_url.strip()}
+    """Run header check + link extraction; final answer must include judged severities."""
+    agent = build_agent(model=model)
+    user_message = HumanMessage(
+        content=f"Target entry URL: {target_url.strip()}\n\nRun the recon process and return the final answer."
+    )
+    # recursion_limit bounds total graph steps (LLM + tool nodes); ~2 per ReAct iteration.
+    config = {"recursion_limit": max_iterations * 2 + 1}
+    inputs = {"messages": [user_message]}
 
-Process (adapt order: use judgment, you are not a rigid script):
-1) Use fetch_headers_for_audit on the entry URL.
-2) Use extract_same_host_links on the entry URL.
-3) **Reason over observations:** If links suggest login, admin, or API surfaces, or a query parameter worth testing on a lab, call additional tools.
-   - Use probe_sensitive_paths_tool with the site's **origin** only (scheme + host + port, no path), e.g. from `http://host/foo` use `http://host`.
-   - Use test_sqli_in_parameter **only** when you have a concrete URL that already has a query param (e.g. `...?id=1`) **and** the user context is an authorized lab; never invent a param name.
-   - For **test_sqli_in_parameter** the Action Input must be JSON on one line, e.g. {{"url":"http://host/page?id=1","parameter_name":"id"}}.
-4) Final Answer: severities (low/medium/high/critical) for each measured issue, grounded only in tool facts. Note uncertainty. Summarize link discovery and any probes you ran. Short overall risk paragraph.
-
-Rules: only report what tools returned; do not claim checks you did not run."""
-    return executor.invoke({"input": instruction, "chat_history": ""})
+    if verbose:
+        final_state: dict = {"messages": []}
+        printed = 0
+        for chunk in agent.stream(inputs, config=config, stream_mode="values"):
+            final_state = chunk
+            messages = chunk.get("messages") or []
+            # Print every new message since last chunk; parallel tool calls yield
+            # multiple ToolMessages appended in a single step.
+            for msg in messages[printed:]:
+                print_trace_message(msg)
+            printed = len(messages)
+        return final_state
+    return agent.invoke(inputs, config=config)
 
 
 def _clean_model_output(text: str) -> str:
@@ -77,9 +112,26 @@ def _clean_model_output(text: str) -> str:
     return t
 
 
+def _extract_final_answer(result: dict) -> str:
+    """Pull the last AI message's text content from a create_agent result."""
+    for msg in reversed(result.get("messages", []) or []):
+        if isinstance(msg, AIMessage):
+            content = msg.content
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts = [
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ]
+                return "\n".join(p for p in parts if p)
+    return ""
+
+
 def print_audit_report(target_url: str, result: dict) -> None:
     """Pretty-print agent result (quiet default: only this + optional errors)."""
-    out = _clean_model_output(str(result.get("output", "")))
+    out = _clean_model_output(_extract_final_answer(result))
     console.print()
     console.print(Rule(f"[bold bright_cyan]Recon — {target_url.strip()}[/]", style="cyan"))
     if not out:
