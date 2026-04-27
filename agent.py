@@ -79,8 +79,8 @@ def run_audit(
     verbose: bool = False,
     max_iterations: int = 25,  # cap ReAct loop length
 ) -> dict:
-    """Run header check + link extraction; final answer must include judged severities."""
     agent = build_agent(model=model)
+    # lang chain treats this as instructions by a person
     user_message = HumanMessage(
         content=f"Target entry URL: {target_url.strip()}\n\nRun the recon process and return the final answer."
     )
@@ -88,6 +88,7 @@ def run_audit(
     config = {"recursion_limit": max_iterations * 2 + 1}
     inputs = {"messages": [user_message]}
 
+    # if user wants to see the full trace, we print it out
     if verbose:
         final_state: dict = {"messages": []}
         printed = 0
@@ -103,7 +104,7 @@ def run_audit(
     return agent.invoke(inputs, config=config)
 
 
-def _clean_model_output(text: str) -> str:
+def clean_model_output(text: str) -> str:
     """Strip accidental markdown fences and extra backticks from Final Answer."""
     t = (text or "").strip()
     t = re.sub(r"^```(?:markdown)?\s*", "", t, flags=re.IGNORECASE)
@@ -112,7 +113,7 @@ def _clean_model_output(text: str) -> str:
     return t
 
 
-def _extract_final_answer(result: dict) -> str:
+def extract_final_answer(result: dict) -> str:
     """Pull the last AI message's text content from a create_agent result."""
     for msg in reversed(result.get("messages", []) or []):
         if isinstance(msg, AIMessage):
@@ -131,7 +132,7 @@ def _extract_final_answer(result: dict) -> str:
 
 def print_audit_report(target_url: str, result: dict) -> None:
     """Pretty-print agent result (quiet default: only this + optional errors)."""
-    out = _clean_model_output(_extract_final_answer(result))
+    out = clean_model_output(extract_final_answer(result))
     console.print()
     console.print(Rule(f"[bold bright_cyan]Recon — {target_url.strip()}[/]", style="cyan"))
     if not out:
