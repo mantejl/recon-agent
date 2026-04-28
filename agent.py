@@ -46,6 +46,7 @@ def build_agent(
     temperature: float = 0,  # controls randomness of model output
 ) -> CompiledStateGraph:
     llm = ChatOpenAI(model=model, temperature=temperature)
+    # a create_agent run returns full message history in order
     return create_agent(llm, RECON_TOOLS, system_prompt=SYSTEM_PROMPT)
 
 
@@ -101,6 +102,7 @@ def run_audit(
                 print_trace_message(msg)
             printed = len(messages)
         return final_state
+    # else just invoke the agent
     return agent.invoke(inputs, config=config)
 
 
@@ -115,9 +117,11 @@ def clean_model_output(text: str) -> str:
 
 def extract_final_answer(result: dict) -> str:
     """Pull the last AI message's text content from a create_agent result."""
+    # do reversed iteration to get the most recent messages (most recent AI message is the final answer)
     for msg in reversed(result.get("messages", []) or []):
         if isinstance(msg, AIMessage):
             content = msg.content
+            # depending on content type, return 
             if isinstance(content, str):
                 return content
             if isinstance(content, list):
@@ -132,6 +136,7 @@ def extract_final_answer(result: dict) -> str:
 
 def print_audit_report(target_url: str, result: dict) -> None:
     """Pretty-print agent result (quiet default: only this + optional errors)."""
+    # using console library to customize output
     out = clean_model_output(extract_final_answer(result))
     console.print()
     console.print(Rule(f"[bold bright_cyan]Recon — {target_url.strip()}[/]", style="cyan"))
@@ -151,19 +156,24 @@ def print_audit_report(target_url: str, result: dict) -> None:
 
 
 def main() -> None:
+    # parse command line arguments
     parser = argparse.ArgumentParser(description="Run recon ReAct agent on one URL")
+    # requiring user to provide a target URL
     parser.add_argument("url", help="Target http(s) URL")
+    # option to choose model
     parser.add_argument(
         "--model",
         default=DEFAULT_MODEL,
         help="OpenAI chat model name",
     )
+    # option to print full trace
     parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
         help="Print full ReAct trace (Thought / Action / Observation)",
     )
+    # parsingn and running the audit
     args = parser.parse_args()
     result = run_audit(args.url, model=args.model, verbose=args.verbose)
     print_audit_report(args.url, result)
