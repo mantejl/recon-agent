@@ -12,22 +12,23 @@ import ssl
 from typing import Any
 from urllib.parse import parse_qs, urldefrag, urlencode, urljoin, urlparse, urlunparse
 
-import httpx
-import truststore
+import httpx # open source http library
+import truststore # to use the same OS trust store as personal laptop
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
-_SSL_CONTEXT = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+# Use system (macOS/Windows/Linux) trust store for TLS certificate verification instead of Python's bundled CA list
+SSL_CONTEXT = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 
 # Canonical header names as servers return them
-_SECURITY_HEADERS: dict[str, str] = {
+SECURITY_HEADERS: dict[str, str] = {
     "x-frame-options": "X-Frame-Options",
     "content-security-policy": "Content-Security-Policy",
     "strict-transport-security": "Strict-Transport-Security",
     "x-content-type-options": "X-Content-Type-Options",
 }
 
-_DEFAULT_TIMEOUT = 15.0
+DEFAULT_TIMEOUT = 15.0
 
 def _sanitize_tool_url(raw: object) -> str:
     """Pull a clean http(s) URL from messy ReAct tool input (dict, newlines, backticks)."""
@@ -47,8 +48,8 @@ def _sanitize_tool_url(raw: object) -> str:
 def _http_get(url: str) -> httpx.Response:
     url = _sanitize_tool_url(url)
     with httpx.Client(
-        verify=_SSL_CONTEXT,
-        timeout=_DEFAULT_TIMEOUT,
+        verify=SSL_CONTEXT,
+        timeout=DEFAULT_TIMEOUT,
         follow_redirects=True,
     ) as client:
         return client.get(url)
@@ -68,7 +69,7 @@ def fetch_headers(url: str) -> dict[str, Any]:
 
     present: dict[str, str] = {}
     findings: list[dict[str, str]] = []
-    for key_lower, canonical in _SECURITY_HEADERS.items():
+    for key_lower, canonical in SECURITY_HEADERS.items():
         if key_lower in lowered:
             present[canonical] = lowered[key_lower]
         else:
